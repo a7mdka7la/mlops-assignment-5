@@ -1,0 +1,137 @@
+name: MLOps Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  # Job 1: Validation Job
+  validate:
+    name: Train and Validate Model
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Cache pip dependencies
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mlflow scikit-learn dvc
+
+      # Pull data with DVC (if dvc.yaml or .dvc exists)
+      - name: Pull data with DVC
+        run: |
+          if [ -f dvc.yaml ] || [ -d .dvc ]; then
+            dvc pull
+          else
+            echo "No DVC configuration found, skipping dvc pull"
+          fi
+
+      # Train model and log to MLflow
+      - name: Train model
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: python train.py
+
+      # Verify model_info.txt was created
+      - name: Verify model_info.txt
+        run: |
+          if [ -f model_info.txt ]; then
+            echo "model_info.txt created successfully"
+            echo "Run ID: $(cat model_info.txt)"
+          else
+            echo "ERROR: model_info.txt not found"
+            exit 1
+          fi
+
+      # Upload artifact for deploy job
+      - name: Upload model_info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-info
+          path: model_info.txt
+          retention-days: 1
+
+  # Job 2: Deployment Job
+  deploy:
+    name: Check Threshold and Deploy
+    needs: validate  # Depends on validate job
+    runs-on: ubuntu-latest
+    if: always() && needs.validate.result == 'success'  # Only run if validate succeeded
+
+    steps:
+      # Checkout the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mlflow scikit-learn
+
+      # Download artifact from validate job
+      - name: Download model_info artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-info
+          path: .
+
+      # Verify artifact was downloaded
+      - name: Verify downloaded artifact
+        run: |
+          echo "Downloaded model_info.txt:"
+          cat model_info.txt
+
+      # Check accuracy threshold
+      - name: Check accuracy threshold
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: python check_threshold.py
+
+      # Mock Docker build (only runs if threshold check passes)
+      - name: Mock Docker Build
+        run: |
+          echo "Building Docker image for Run ID: $(cat model_info.txt)"
+          echo "Docker build simulation completed successfully!"
+          echo "In production, this would run:"
+          echo "  docker build --build-arg RUN_ID=$(cat model_info.txt) -t model-deploy ."
+
+      # Optional: Set up Docker Buildx and build actual image (if Docker is configured)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (actual)
+        run: |
+          RUN_ID=$(cat model_info.txt)
+          docker build --build-arg RUN_ID=${RUN_ID} -t model-deploy:${{ github.run_id }} .
