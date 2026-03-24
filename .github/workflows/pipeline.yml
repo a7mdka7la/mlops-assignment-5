@@ -68,14 +68,15 @@ jobs:
             exit 1
           fi
 
-      # Upload artifact for deploy job
+      # Package and upload artifact for deploy job
+      - name: Package artifacts
+        run: tar -czf artifacts.tar.gz model_info.txt mlruns/
+
       - name: Upload model_info artifact
         uses: actions/upload-artifact@v4
         with:
           name: model-info
-          path: |
-            model_info.txt
-            mlruns/
+          path: artifacts.tar.gz
           retention-days: 1
 
   # Job 2: Deployment Job
@@ -109,9 +110,10 @@ jobs:
           name: model-info
           path: .
 
-      # Verify artifact was downloaded
+      # Unpackage and verify downloaded artifact
       - name: Verify downloaded artifact
         run: |
+          tar -xzf artifacts.tar.gz
           echo "Downloaded model_info.txt:"
           cat model_info.txt
 
